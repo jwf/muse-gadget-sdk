@@ -81,6 +81,7 @@ HARNESS = r'''
 #include "fake.h"
 #include <string.h>
 #include "voice_board.h"
+#include "voice_board_xvf3800.h"
 
 typedef struct {
     int attempts, receives;
@@ -99,6 +100,8 @@ static int pending_resource, pending_attempt;
 static bool pending_receive;
 static uint8_t gpo_values[5];
 static int amp_attempts, amp_errors[16], amp_values[16];
+static int led_writes;
+static uint8_t led_cmds[16], led_payloads[16][48];
 static int codec_calls, codec_error_at;
 static uint8_t codec_regs[64], codec_vals[64];
 static int i2s_new_calls, i2s_new_error, i2s_mode_calls, i2s_mode_error_on;
@@ -160,6 +163,15 @@ esp_err_t i2c_master_transmit(void *handle, const uint8_t *data, size_t len, int
         pending_receive = true;
         if (pending_resource == 20 && expect_post_capture) assert(i2s_read_calls > 0);
         return pending_attempt < 128 ? pending_script->tx_errors[pending_attempt] : ESP_OK;
+    }
+    // LED ring frame: [GPO 20, cmd 19 (>= 1.0.8) or 18, 48, B/G/R/0 x 12].
+    // Fork addition: the driver drives the ring for led_status.c.
+    if (len == 51 && data[0] == 20 && (data[1] == 19 || data[1] == 18) && data[2] == 48) {
+        assert(led_writes < 16);
+        led_cmds[led_writes] = data[1];
+        memcpy(led_payloads[led_writes], data + 3, 48);
+        led_writes++;
+        return ESP_OK;
     }
     assert(len == 5 && data[0] == 20 && data[1] == 1 && data[2] == 2 && data[3] == 31);
     assert(amp_attempts < 16);
@@ -363,6 +375,29 @@ int main(int argc, char **argv) {
         voice_board_amp(true);
         voice_board_amp(false);
         assert(amp_attempts == 3 && amp_values[1] == 0 && amp_values[2] == 1 && !locked);
+    } else if (!strcmp(scenario, "led")) {
+        // Fork addition: the driver drives the 12-LED ring for led_status.c.
+        // Version 1.0.9, so the ring command is 19. Frames are B/G/R/0 per
+        // LED; an unchanged frame skips the bus.
+        expect_init();
+        uint8_t frame[XVF3800_LED_COUNT][3] = {{0}};
+        frame[0][0] = 255;  // LED 0 red
+        frame[1][1] = 255;  // LED 1 green
+        frame[2][2] = 255;  // LED 2 blue
+        assert(xvf3800_led_ring_show(frame) == ESP_OK);
+        assert(led_writes == 1 && led_cmds[0] == 19);
+        assert(led_payloads[0][0] == 0 && led_payloads[0][1] == 0 &&
+               led_payloads[0][2] == 255 && led_payloads[0][3] == 0);
+        assert(led_payloads[0][4] == 0 && led_payloads[0][5] == 255 &&
+               led_payloads[0][6] == 0 && led_payloads[0][7] == 0);
+        assert(led_payloads[0][8] == 255 && led_payloads[0][9] == 0 &&
+               led_payloads[0][10] == 0 && led_payloads[0][11] == 0);
+        assert(xvf3800_led_ring_show(frame) == ESP_OK);
+        assert(led_writes == 1);  // unchanged frame: no new write
+        frame[0][0] = 0;
+        assert(xvf3800_led_ring_show(frame) == ESP_OK);
+        assert(led_writes == 2 && led_cmds[1] == 19);
+        assert(!locked);
     } else if (!strcmp(scenario, "capture")) {
         expect_init();
         int16_t pcm[324];
@@ -472,7 +507,7 @@ COMMON_SCENARIOS = (
     "speaker",
     "volume",
 )
-SCENARIOS = COMMON_SCENARIOS + ("amp_failure", "amp", "mute", "capture_muted")
+SCENARIOS = COMMON_SCENARIOS + ("amp_failure", "amp", "led", "mute", "capture_muted")
 
 
 class RespeakerXvf3800AudioTests(unittest.TestCase):

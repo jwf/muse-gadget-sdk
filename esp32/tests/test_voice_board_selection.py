@@ -58,6 +58,16 @@ class VoiceBoardSelectionTests(unittest.TestCase):
             with self.subTest(product=product):
                 self.run_selector([product], [PRODUCT_STATUS[product]], source=source)
 
+    def test_xvf3800_accepts_its_led_ring_backend(self):
+        # Fork addition: upstream requires LED_BACKEND_NONE for the XVF3800
+        # (its ring is unused). This fork drives the ring as the Muse status
+        # indicator, so the XVF3800 LED backend is accepted too.
+        self.run_selector(
+            ["RESPEAKER_XVF3800"],
+            ["RESPEAKER_XVF3800"],
+            source="voice_board_xvf3800.c",
+        )
+
     def test_unspecified_and_zero_selection_have_no_fallback(self):
         for products in ((), ("UNSPECIFIED",)):
             with self.subTest(products=products):
