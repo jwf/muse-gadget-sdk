@@ -175,8 +175,10 @@ voice note that Muse answers in the app, and the dial sets the speaker volume
 
 `tools/board.sh seeed-respeaker-xvf3800 build` builds a Link-only voice profile
 for the XIAO ESP32-S3 SKU. XVF3800 needs its 16 kHz I2S-slave firmware at the
-1.0.9 baseline. It uses XIAO BOOT for pairing and push-to-talk, with app prompts
-and serial logs instead of a Muse status light. The vendor ring is unused. See
+1.0.9 baseline. It uses XIAO BOOT for pairing and push-to-talk, drives the
+vendor 12-LED ring over I2C as the Muse status indicator, and listens for the
+"Jarvis" wake word (ESP-SR WakeNet, on by default). Pairing, push-to-talk and
+the wake word are verified on hardware; see
 the [XVF3800 guide](devices/seeed-respeaker-xvf3800.md) for firmware files,
 controls and unverified hardware behavior.
 
