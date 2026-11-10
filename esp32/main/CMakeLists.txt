@@ -137,6 +137,13 @@ if(CONFIG_HOMEHUB_VOICE)
         "voice_player.c"
     )
     include("voice_board_select.cmake")
+    if(CONFIG_HOMEHUB_WAKE_WORD)
+        list(APPEND GADGET_SRCS "wake_word.c")
+        # The esp-sr component itself is gated by a rule in
+        # main/idf_component.yml, so it is only downloaded when the wake
+        # word is on. Short name, as led_strip is referenced above.
+        list(APPEND GADGET_REQUIRES esp-sr)
+    endif()
 endif()
 
 idf_component_register(

@@ -19,12 +19,20 @@
 # Sources: https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY
 # and https://wiki.seeedstudio.com/respeaker_xvf3800_xiao_i2s/
 # XIAO BOOT=GPIO0, SDA=GPIO5, SCL=GPIO6, WS=GPIO7, BCLK=GPIO8,
-# ESP32 DOUT=GPIO44, DIN=GPIO43. USB serial: Espressif 303a:1001.
+# ESP32 DOUT=GPIO44, DIN=GPIO43 (transposed vs the reSpeaker Lite).
+# USB serial: Espressif 303a:1001.
+# Fork changes vs upstream: the 12-LED ring is driven over I2C as the Muse
+# status indicator (HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800, not NONE), and
+# the "Jarvis" wake word is on by default (HOMEHUB_WAKE_WORD).
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
-CONFIG_HOMEHUB_LED_BACKEND_NONE=y
+CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800=y
 CONFIG_HOMEHUB_VOICE=y
 CONFIG_HOMEHUB_VOICE_BOARD_RESPEAKER_XVF3800=y
+# Hands-free wake word ("Jarvis") via ESP-SR WakeNet. The model is selected
+# below and packed into the model partition by the esp-sr component.
+CONFIG_HOMEHUB_WAKE_WORD=y
+CONFIG_SR_WN_WN9_JARVIS_TTS=y
 CONFIG_HOMEHUB_BLE_NAME_SUFFIX="-xvf3800"
 CONFIG_HOMEHUB_BUTTON_GPIO=0
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y

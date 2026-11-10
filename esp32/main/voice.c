@@ -36,6 +36,9 @@
 #include "voice_board.h"
 #include "voice_muse_chat.h"
 #include "voice_player.h"
+#if CONFIG_HOMEHUB_WAKE_WORD
+#include "wake_word.h"
+#endif
 #if CONFIG_MUSE_REALTIME_VOICE
 #include "muse_voice_call.h"
 #include "muse_voice_call_core.h"
@@ -58,6 +61,25 @@ static const char *TAG = "link.voice";
 // Keep listening briefly after release so the last word is not clipped.
 #define RELEASE_TAIL_MS     250
 #define REPLY_CHUNK         (VOICE_PLAYER_RATE / 50)   // 20 ms
+
+#if CONFIG_HOMEHUB_WAKE_WORD
+// End a hands-free (wake-word) turn after this long with no speech, once
+// this much audio is in. The pause right after "Jarvis" is not an end:
+// the question follows the wake word, and the 1 s floor keeps the turn
+// open through it. A peak below this counts as quiet (the XMOS noise
+// suppression keeps the stream clean when nobody is speaking); a noisy
+// room just means the turn runs to the 15 s cap instead.
+#define WAKE_SILENCE_PEAK   400
+#define WAKE_MIN_SPEECH_MS  1000
+#define WAKE_SILENCE_END_MS 2000
+// Re-check readiness while listening this often.
+#define WAKE_POLL_US        1000000
+// WakeNet inference runs on the voice task, so give it more stack than the
+// push-to-talk-only 4 KB. The stack is in PSRAM, not internal RAM.
+#define VOICE_TASK_STACK    6144
+#else
+#define VOICE_TASK_STACK    4096
+#endif
 
 typedef enum { EVT_PRESS, EVT_RELEASE } voice_evt_t;
 
@@ -116,12 +138,15 @@ static bool pressed_again(TickType_t wait) {
 }
 
 // Stream the microphone into the turn until release (plus a tail) or the
-// limit. Returns the number of samples, 0 if the capture failed.
-static size_t record(void) {
+// limit. A hands-free turn has no button to release, so it also ends after
+// WAKE_SILENCE_END_MS of quiet, once WAKE_MIN_SPEECH_MS of audio is in.
+// Returns the number of samples, 0 if the capture failed.
+static size_t record(bool wake_triggered) {
     static int16_t chunk[CAPTURE_CHUNK];
     if (voice_board_mic_start() != ESP_OK) return 0;
     size_t samples = 0;
     int64_t stop_at = 0;
+    int64_t silent_since = 0;   // when the current quiet stretch started
     while (samples < CAPTURE_MAX) {
         voice_evt_t evt;
         if (!stop_at && xQueueReceive(s_events, &evt, 0) == pdTRUE && evt == EVT_RELEASE) {
@@ -134,6 +159,20 @@ static size_t record(void) {
         muse_hatch_turn_audio(chunk, got);
         samples += got;
         led_status_set_level(peak / 12000.0f);
+#if CONFIG_HOMEHUB_WAKE_WORD
+        if (wake_triggered) {
+            if (peak < WAKE_SILENCE_PEAK) {
+                if (!silent_since) silent_since = esp_timer_get_time();
+                else if (samples >= VOICE_MIC_RATE * WAKE_MIN_SPEECH_MS / 1000 &&
+                         esp_timer_get_time() - silent_since >= WAKE_SILENCE_END_MS * 1000LL) {
+                    ESP_LOGI(TAG, "wake turn ended on silence");
+                    break;
+                }
+            } else {
+                silent_since = 0;
+            }
+        }
+#endif
     }
     voice_board_mic_stop();
     if (samples >= CAPTURE_MAX) ESP_LOGI(TAG, "capture limit reached");
@@ -327,19 +366,22 @@ static void run_call(void) {
 }
 #endif
 
-// Returns true if a new press interrupted the turn.
-static bool run_turn(void) {
+// Returns true if a new press interrupted the turn. wake_triggered is true
+// when the turn started from the wake word rather than the button: there is
+// no release to end it, and a short capture is a failed mic, never a tap.
+static bool run_turn(bool wake_triggered) {
     voice_player_stop();
     led_status_set_level(0);
     led_status_set_voice(LED_VOICE_LISTENING);
     muse_hatch_turn_begin();
-    size_t samples = record();
+    size_t samples = record(wake_triggered);
     if (samples < VOICE_MIC_RATE * CAPTURE_MIN_MS / 1000) {
         muse_hatch_turn_cancel();
         if (!samples) return fail("microphone unavailable");
 #if CONFIG_MUSE_REALTIME_VOICE
-        // A tap: a call, beside holding for a note.
-        if (muse_voice_call_ready()) {
+        // A tap: a call, beside holding for a note. Never for a wake-word
+        // turn: a short capture there means the mic failed, not a tap.
+        if (!wake_triggered && muse_voice_call_ready()) {
             run_call();
             return false;
         }
@@ -367,6 +409,53 @@ static bool on_press(bool pressed) {
     return true;
 }
 
+#if CONFIG_HOMEHUB_WAKE_WORD
+typedef enum { WAKE_WAIT_PRESS, WAKE_WAIT_WAKE, WAKE_WAIT_ERROR } wake_wait_t;
+
+// Wait for a turn trigger: the wake word, or the button. While the device
+// cannot take a turn (not paired, or muted) only the button counts, and it
+// is polled so readiness is re-checked; listening starts by itself once
+// paired and unmuted. Listening owns the mic while it waits; a turn takes
+// it over with its own mic_start/stop. Returns ERROR on a mic failure, so
+// the caller can retry after a short delay.
+static wake_wait_t wake_word_wait(void) {
+    if (!wake_word_available() || !muse_hatch_ready() || voice_board_muted()) {
+        return pressed_again(pdMS_TO_TICKS(1000)) ? WAKE_WAIT_PRESS : WAKE_WAIT_ERROR;
+    }
+    if (voice_board_mic_start() != ESP_OK) {
+        ESP_LOGW(TAG, "wake word: microphone unavailable");
+        return WAKE_WAIT_ERROR;
+    }
+    static int16_t chunk[CAPTURE_CHUNK];
+    wake_wait_t out = WAKE_WAIT_ERROR;
+    int64_t next_poll = esp_timer_get_time() + WAKE_POLL_US;
+    for (;;) {
+        int peak = 0;
+        size_t got = voice_board_mic_read(chunk, CAPTURE_CHUNK, &peak);
+        if (!got) break;
+        if (wake_word_feed(chunk, got)) {
+            out = WAKE_WAIT_WAKE;
+            break;
+        }
+        // The button still works while listening: on_press only queues a
+        // press when a turn can run, so a queued press here is a real one.
+        voice_evt_t evt;
+        if (xQueueReceive(s_events, &evt, 0) == pdTRUE && evt == EVT_PRESS) {
+            out = WAKE_WAIT_PRESS;
+            break;
+        }
+        if (esp_timer_get_time() >= next_poll) {
+            next_poll += WAKE_POLL_US;
+            // Unmuted or unlinked mid-listen: stop listening and let the
+            // caller fall back to waiting for the button.
+            if (!muse_hatch_ready() || voice_board_muted()) break;
+        }
+    }
+    voice_board_mic_stop();
+    return out;
+}
+#endif
+
 static void voice_task(void *arg) {
     if (voice_board_init() != ESP_OK || voice_player_init() != ESP_OK) {
         ESP_LOGE(TAG, "audio hardware unavailable; voice chat disabled");
@@ -381,8 +470,19 @@ static void voice_task(void *arg) {
     ESP_LOGI(TAG, "ready");
 
     for (;;) {
+#if CONFIG_HOMEHUB_WAKE_WORD
+        wake_wait_t w = wake_word_wait();
+        if (w == WAKE_WAIT_ERROR) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        bool wake = (w == WAKE_WAIT_WAKE);
+#else
         if (!pressed_again(portMAX_DELAY)) continue;
-        while (run_turn()) {
+        bool wake = false;
+#endif
+        while (run_turn(wake)) {
+            wake = false;
         }
     }
 }
@@ -396,9 +496,15 @@ void voice_init(void) {
     atomic_store(&s_volume, load_volume());
     voice_hatch_refresh();
     muse_hatch_start();
+#if CONFIG_HOMEHUB_WAKE_WORD
+    // Load the wake-word model before the voice task starts, so the task
+    // never feeds a half-initialised detector. On failure the device is
+    // push-to-talk only; wake_word_init logs why.
+    if (!wake_word_init()) ESP_LOGW(TAG, "wake word unavailable; push-to-talk only");
+#endif
     // The stack is in PSRAM, so the task must not touch flash (NVS): pairing
     // needs an 8 KB internal block for its TLS task.
-    if (xTaskCreateWithCaps(voice_task, "voice", 4096, NULL, 4, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+    if (xTaskCreateWithCaps(voice_task, "voice", VOICE_TASK_STACK, NULL, 4, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "failed to start voice chat");
         return;
     }

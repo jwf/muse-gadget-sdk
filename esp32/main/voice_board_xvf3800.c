@@ -18,8 +18,13 @@
  * Requires same-major 16 kHz, two-channel I2S-slave XMOS firmware >= 1.0.9.
  * The vendor firmware retains ownership of XMOS reset and audio routing.
  * https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY
+ *
+ * Fork addition (rebase onto upstream main): this file also drives the
+ * 12-LED ring over I2C (xvf3800_led_ring_show), so led_status.c can use it
+ * as the Muse status indicator instead of leaving the ring unused.
  */
 #include "voice_board.h"
+#include "voice_board_xvf3800.h"
 
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
@@ -27,6 +32,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+
+#include <string.h>
 
 #ifndef CONFIG_HOMEHUB_VOICE_BOARD_RESPEAKER_XVF3800
 #error "voice_board_xvf3800.c requires CONFIG_HOMEHUB_VOICE_BOARD_RESPEAKER_XVF3800"
@@ -45,6 +52,8 @@
 #define XVF_GPO_RESOURCE 20
 #define XVF_GPO_READ_COMMAND 0
 #define XVF_GPO_WRITE_COMMAND 1
+#define XVF_GPO_LED_RING_VALUE 19       // firmware >= 1.0.8
+#define XVF_GPO_LED_RING_VALUE_PRE_108 18
 #define XVF_AMP_PIN 31
 #define XVF_CONTROL_ATTEMPTS 5
 #define XVF_CONTROL_TIMEOUT_MS 100
@@ -67,6 +76,13 @@ static i2s_chan_handle_t s_tx;
 static int32_t s_raw[XVF_MIC_CHUNK_FRAMES * 2];
 static bool s_mic_on;
 static bool s_ready;
+// Firmware version, for the LED ring command choice (cmd 19 on >= 1.0.8,
+// cmd 18 before). Set by voice_board_init once the version read succeeds.
+static uint8_t s_fw_major, s_fw_minor, s_fw_patch;
+static bool s_fw_known;
+// Last LED frame, so an unchanged frame skips the bus (as in ESPHome).
+static uint8_t s_last_led_frame[XVF3800_LED_COUNT][3];
+static bool s_led_frame_valid;
 
 static esp_err_t xmos_read(uint8_t resource, uint8_t command, uint8_t *out, size_t len) {
     if (!s_xmos || !s_lock) return ESP_ERR_INVALID_STATE;
@@ -122,10 +138,57 @@ static esp_err_t amp_set(bool on) {
     return xmos_write(XVF_GPO_RESOURCE, XVF_GPO_WRITE_COMMAND, payload, sizeof(payload));
 }
 
+// One XMOS control write with a payload too large for xmos_write's 5-byte
+// cap (the LED ring frame is 48 bytes). Single attempt: the frame is
+// re-sent on the next state change, and the LED task re-renders while
+// listening. Fork addition for the LED ring (see xvf3800_led_ring_show).
+static esp_err_t xmos_write_bytes(uint8_t resource, uint8_t command, const uint8_t *value, size_t len) {
+    uint8_t buf[3 + 48];
+    if (!s_xmos || !s_lock) return ESP_ERR_INVALID_STATE;
+    if (len > 48) return ESP_ERR_INVALID_SIZE;
+    buf[0] = resource;
+    buf[1] = command;
+    buf[2] = (uint8_t)len;
+    if (len && value) memcpy(&buf[3], value, len);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    esp_err_t err = i2c_master_transmit(s_xmos, buf, 3 + len, XVF_CONTROL_TIMEOUT_MS);
+    xSemaphoreGive(s_lock);
+    return err;
+}
+
 void voice_board_amp(bool on) {
     if (!s_ready) return;
     esp_err_t err = amp_set(on);
     if (err != ESP_OK) ESP_LOGW(TAG, "amplifier: %s", esp_err_to_name(err));
+}
+
+// 12-LED ring over I2C, for the LED status backend (led_status.c).
+// rgb is 12 x {R, G, B}. Unchanged frames skip the bus. No-ops until the
+// voice board has the I2C bus up (the LED task starts before voice init).
+// Fork addition: upstream leaves the vendor ring unused.
+esp_err_t xvf3800_led_ring_show(const uint8_t rgb[XVF3800_LED_COUNT][3]) {
+    if (!s_xmos || !s_lock) return ESP_ERR_INVALID_STATE;
+    if (s_led_frame_valid && memcmp(s_last_led_frame, rgb, sizeof(s_last_led_frame)) == 0) {
+        return ESP_OK;
+    }
+    memcpy(s_last_led_frame, rgb, sizeof(s_last_led_frame));
+    s_led_frame_valid = true;
+    uint8_t payload[XVF3800_LED_COUNT * 4];
+    for (int i = 0; i < XVF3800_LED_COUNT; i++) {
+        payload[i * 4 + 0] = rgb[i][2];  // B
+        payload[i * 4 + 1] = rgb[i][1];  // G
+        payload[i * 4 + 2] = rgb[i][0];  // R
+        payload[i * 4 + 3] = 0x00;
+    }
+    // LED_RING_COLOR is cmd 19 from firmware 1.0.8 on; before that it was
+    // cmd 18. The target firmware is 1.0.9.
+    uint8_t cmd = (s_fw_known && (s_fw_major > 1 ||
+                  (s_fw_major == 1 && (s_fw_minor > 0 || s_fw_patch >= 8))))
+                      ? XVF_GPO_LED_RING_VALUE
+                      : XVF_GPO_LED_RING_VALUE_PRE_108;
+    esp_err_t err = xmos_write_bytes(XVF_GPO_RESOURCE, cmd, payload, sizeof(payload));
+    if (err != ESP_OK) ESP_LOGW(TAG, "LED ring: %s", esp_err_to_name(err));
+    return err;
 }
 
 void voice_board_set_volume(int percent) {
@@ -272,6 +335,11 @@ esp_err_t voice_board_init(void) {
                  XVF_MIN_VERSION_MAJOR, XVF_MIN_VERSION_MINOR, XVF_MIN_VERSION_PATCH);
         return ESP_ERR_INVALID_RESPONSE;
     }
+    // Remember the version for the LED ring command choice (cmd 19 vs 18).
+    s_fw_major = version[0];
+    s_fw_minor = version[1];
+    s_fw_patch = version[2];
+    s_fw_known = true;
     err = amp_set(false);
     if (err != ESP_OK) return err;
 

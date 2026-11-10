@@ -53,9 +53,12 @@ elseif(HOMEHUB_VOICE_BOARD_SELECTED STREQUAL "RESPEAKER_LITE")
     endif()
     set(HOMEHUB_VOICE_BOARD_SOURCE "voice_board_respeaker_lite.c")
 elseif(HOMEHUB_VOICE_BOARD_SELECTED STREQUAL "RESPEAKER_XVF3800")
-    if(NOT CONFIG_HOMEHUB_LED_BACKEND_NONE)
+    # Upstream requires NONE here (the vendor ring is unused in stock
+    # upstream). This fork also drives the ring as the Muse status
+    # indicator, so the XVF3800 LED backend is accepted too.
+    if(NOT CONFIG_HOMEHUB_LED_BACKEND_NONE AND NOT CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800)
         message(FATAL_ERROR
-            "HOMEHUB_VOICE_BOARD_RESPEAKER_XVF3800 requires HOMEHUB_LED_BACKEND_NONE")
+            "HOMEHUB_VOICE_BOARD_RESPEAKER_XVF3800 requires HOMEHUB_LED_BACKEND_NONE or HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800")
     endif()
     set(HOMEHUB_VOICE_BOARD_SOURCE "voice_board_xvf3800.c")
 elseif(HOMEHUB_VOICE_BOARD_SELECTED STREQUAL "WAVESHARE_154G")

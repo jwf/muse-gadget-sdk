@@ -36,6 +36,8 @@
 #elif CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE
 #include "driver/gpio.h"
 #include "led_strip.h"
+#elif CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800
+#include "voice_board_xvf3800.h"
 #elif CONFIG_HOMEHUB_LED_BACKEND_C3_SSD1306
 #include "driver/i2c_master.h"
 #include "pixel_font.h"
@@ -119,6 +121,12 @@ static const char *TAG = "link.led";
 #define RING_LEDS            12
 #endif
 #define LED_STRIP_RMT_RES_HZ (10 * 1000 * 1000)
+// How long the ring stays green after connecting before it goes dark.
+#define RING_CONNECTED_MS    3000
+#elif CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800
+// Seeed reSpeaker XVF3800: 12 WS2812 LEDs in a ring, driven over I2C by the
+// XMOS (voice_board_xvf3800.c). No RMT strip, no power GPIO.
+#define RING_LEDS            12
 // How long the ring stays green after connecting before it goes dark.
 #define RING_CONNECTED_MS    3000
 #elif CONFIG_HOMEHUB_LED_BACKEND_C3_SSD1306
@@ -491,6 +499,44 @@ static bool led_hw_init(void) {
     }
 
     ESP_LOGI(TAG, "LED status ready: %d addressable LED(s) (GPIO=%d)", RING_LEDS, RING_GPIO);
+    return true;
+}
+#elif CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800
+// Steady frames shown since the ring last turned green for "connected".
+static int s_connected_frames = 0;
+
+static void ring_show(const rgb_t *px) {
+    uint8_t rgb[RING_LEDS][3];
+    for (int i = 0; i < RING_LEDS; i++) {
+        rgb[i][0] = px[i].r;
+        rgb[i][1] = px[i].g;
+        rgb[i][2] = px[i].b;
+    }
+    // No-op until the voice board has the I2C bus up: the LED task starts
+    // before voice init, so early frames are dropped.
+    (void)xvf3800_led_ring_show(rgb);
+}
+
+static void ring_fill(rgb_t c) {
+    rgb_t px[RING_LEDS];
+    for (int i = 0; i < RING_LEDS; i++) px[i] = c;
+    ring_show(px);
+}
+
+static void led_hw_set_color(rgb_t c) {
+    s_connected_frames = 0;
+    ring_fill(c);
+}
+
+// Connected: green for a moment, then dark until something happens.
+static void led_hw_set_connected(void) {
+    ring_fill(s_connected_frames * 200 < RING_CONNECTED_MS ? COLOR_GREEN : COLOR_OFF);
+    if (s_connected_frames * 200 < RING_CONNECTED_MS) s_connected_frames++;
+}
+
+static bool led_hw_init(void) {
+    // The I2C bus belongs to the voice board; nothing to set up here.
+    ESP_LOGI(TAG, "LED status ready: XVF3800 12-LED ring over I2C");
     return true;
 }
 #elif CONFIG_HOMEHUB_LED_BACKEND_C3_SSD1306
@@ -1329,7 +1375,7 @@ static bool led_hw_init(void) {
 #endif
 
 #if !CONFIG_HOMEHUB_DISPLAY
-#if !(CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE)
+#if !(CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800)
 static void led_hw_set_connected(void) {
     led_hw_set_color(COLOR_GREEN);
 }
@@ -1375,7 +1421,7 @@ static void led_wait(int ms) {
 #endif
 }
 
-#if CONFIG_HOMEHUB_VOICE && (CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE)
+#if CONFIG_HOMEHUB_VOICE && (CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800)
 #define VOICE_FRAME_MS 40
 // Three 200 ms flashes.
 #define VOICE_ERROR_FRAMES 30
@@ -1493,7 +1539,7 @@ static void led_task(void *arg) {
         led_wait(200);
         continue;
 #endif
-#if CONFIG_HOMEHUB_VOICE && (CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE)
+#if CONFIG_HOMEHUB_VOICE && (CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800)
         if (voice_render()) continue;
 #endif
 
@@ -1566,8 +1612,9 @@ bool led_status_init(void) {
 
     led_hw_set_color(COLOR_ORANGE);
     // 2026-09-20: increase margin; measured only 904 bytes free with a 2048-byte stack.
-#if CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE
-    // The RMT ring driver takes about 2 KB of the task's stack per frame.
+#if CONFIG_HOMEHUB_LED_BACKEND_VOICE_RING || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_LITE || CONFIG_HOMEHUB_LED_BACKEND_RESPEAKER_XVF3800
+    // The ring drivers take about 2 KB of the task's stack per frame
+    // (RMT on the Voice PE / Lite; the I2C write on the XVF3800).
     const uint32_t stack = 4096;
 #else
     const uint32_t stack = 3072;

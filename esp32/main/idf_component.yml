@@ -16,6 +16,16 @@ dependencies:
   espressif/esp_websocket_client: "~1.2"
   espressif/cjson: "~1.7"
   espressif/led_strip: "~3.0"
+  # ESP-SR WakeNet, for the hands-free wake word (CONFIG_HOMEHUB_WAKE_WORD).
+  # Pinned to 2.6.1: the newest release that still declares IDF >=5.0, and
+  # the first whose libs ship an IDF 6 build. Only pulled in when the wake
+  # word is on, so other boards never download it. Note the rule compares
+  # against True, not "y": the component manager reads sdkconfig as JSON,
+  # where a bool set to y is true.
+  espressif/esp-sr:
+    version: "2.6.1"
+    rules:
+      - if: '$CONFIG{HOMEHUB_WAKE_WORD} == True'
   # The ESP32-2432S028 (CYD) status screen.
   espressif/esp_lcd_ili9341:
     version: "~2.1"

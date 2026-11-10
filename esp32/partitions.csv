@@ -19,6 +19,10 @@
 # they are written during manufacturing. otadata selects the boot slot;
 # device.ota writes the inactive ota slot. Slots are capped at 2 MB by the
 # prod_data offset (0x420000); watch the build's check_sizes line.
+# The model partition holds ESP-SR speech models (srmodels.bin, e.g. the
+# "Jarvis" WakeNet model) for boards with CONFIG_HOMEHUB_WAKE_WORD. It sits
+# after prod_bak and moves nothing; flash is 8 MB, so 1 MB here leaves room
+# for more models later.
 #
 # The partition table lives at CONFIG_PARTITION_TABLE_OFFSET=0x10000 (see
 # sdkconfig.defaults), NOT the IDF default 0x8000. A Secure Boot V2 bootloader
@@ -36,3 +40,4 @@ ota_0,     app,  ota_0,   0x20000,  2M,
 ota_1,     app,  ota_1,   0x220000, 2M,
 prod_data, data, 0x40,    0x420000, 0x1000,
 prod_bak,  data, 0x41,    0x421000, 0x1000,
+model,     data, spiffs,  0x422000, 0x100000,
