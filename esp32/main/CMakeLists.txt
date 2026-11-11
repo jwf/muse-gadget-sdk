@@ -135,6 +135,7 @@ if(CONFIG_HOMEHUB_VOICE)
         "voice.c"
         "voice_muse_chat.c"
         "voice_player.c"
+        "device_fingerprint.c"
     )
     include("voice_board_select.cmake")
     if(CONFIG_HOMEHUB_WAKE_WORD)

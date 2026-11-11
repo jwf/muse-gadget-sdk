@@ -39,6 +39,9 @@
 #if CONFIG_HOMEHUB_WAKE_WORD
 #include "wake_word.h"
 #endif
+#if CONFIG_HOMEHUB_DEVICE_FINGERPRINT
+#include "device_fingerprint.h"
+#endif
 #if CONFIG_MUSE_REALTIME_VOICE
 #include "muse_voice_call.h"
 #include "muse_voice_call_core.h"
@@ -392,6 +395,9 @@ static bool run_turn(bool wake_triggered) {
     }
     ESP_LOGI(TAG, "recorded %.1fs", (double)samples / VOICE_MIC_RATE);
     led_status_set_voice(LED_VOICE_TRANSCRIBING);
+#if CONFIG_HOMEHUB_DEVICE_FINGERPRINT
+    device_fingerprint_append();
+#endif
     muse_hatch_turn_end();
     return reply();
 }

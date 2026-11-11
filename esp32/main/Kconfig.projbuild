@@ -597,6 +597,20 @@ menu "ESP32 Device SDK"
             AEC/NS/beamforming/AGC, so no ESP-SR AFE is used: WakeNet runs
             directly on the 16 kHz mic stream.
 
+    config HOMEHUB_DEVICE_FINGERPRINT
+        bool "Mark voice notes with a DTMF device fingerprint"
+        depends on HOMEHUB_VOICE
+        default y
+        help
+            Append a brief DTMF burst (three digits, ~0.45 s) to the tail
+            of every voice-note turn, encoding this device's id (the last
+            octet of the Wi-Fi STA MAC) plus a check digit, so the
+            assistant can tell a note sent from the gadget apart from a
+            voice note recorded in the Muse app -- the gadget has no
+            unlock step, so its turns need stricter rules. The burst is
+            synthesized and fed through the turn-audio path, so it travels
+            inside the note itself. See main/device_fingerprint.h.
+
     config HOMEHUB_SENSECAP_SENSORS
         bool "SenseCAP Indicator air sensors (sensors.read)"
         depends on HOMEHUB_LED_BACKEND_SENSECAP_ST7701
